@@ -896,6 +896,33 @@
       display: flex
     }
 
+    .proj-edit {
+      position: absolute;
+      top: .55rem;
+      right: 2.2rem;
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      background: rgba(240, 182, 40, .12);
+      border: 1px solid rgba(240, 182, 40, .25);
+      color: var(--gold);
+      font-size: .72rem;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      transition: .3s;
+      font-family: 'Poppins', sans-serif
+    }
+
+    .proj-edit:hover {
+      background: rgba(240, 182, 40, .28)
+    }
+
+    .admin-mode .proj-edit {
+      display: flex
+    }
+
     .add-proj-btn {
       display: none;
       align-items: center;
@@ -1822,11 +1849,12 @@
         <input type="text" id="projTools" placeholder="Adobe Photoshop, Illustrator" />
       </div>
 
-      <label>Cover Image (Upload to get name or type path)</label>
-      <div style="display:flex; gap:0.5rem;">
-        <input type="file" id="projCoverFile" accept="image/*" style="flex:1" onchange="document.getElementById('projCoverPath').value = this.files[0].name" />
-        <input type="text" id="projCoverPath" placeholder="image-name.jpg" style="flex:1" />
+      <label>Cover Image (Upload)</label>
+      <div style="display:flex; gap:0.5rem; align-items:center;">
+        <input type="file" id="projCoverFile" accept="image/*" style="flex:1" onchange="document.getElementById('coverFileName').textContent = this.files[0]?.name || ''; document.getElementById('coverKeepNote').style.display='none';" />
+        <span id="coverFileName" style="font-size:0.75rem; color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
       </div>
+      <p id="coverKeepNote" style="font-size:0.72rem; color:var(--gold); margin-top:0.3rem; display:none;">✓ الصورة الحالية محفوظة — ارفع صورة جديدة لتغييرها</p>
 
       <div id="extraFields" style="display:none">
         <label>Upload PDF File</label>
@@ -1877,21 +1905,69 @@
     const ADMIN_PASSWORD = "AE2025@admin";
     let isAdmin = false;
     let currentAddCat = "";
+    let editingProjectId = null; // for edit mode
 
     // ══════════════════════════════
-    // STORAGE HELPERS
+    // INDEXEDDB FOR BIG FILES
+    // ══════════════════════════════
+    let db = null;
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        if (db) return resolve(db);
+        const req = indexedDB.open("ae_portfolio_db", 1);
+        req.onupgradeneeded = e => {
+          const d = e.target.result;
+          if (!d.objectStoreNames.contains("files")) d.createObjectStore("files");
+        };
+        req.onsuccess = e => { db = e.target.result; resolve(db); };
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function dbSet(key, value) {
+      const d = await openDB();
+      return new Promise((res, rej) => {
+        const tx = d.transaction("files", "readwrite");
+        tx.objectStore("files").put(value, key);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    }
+    async function dbGet(key) {
+      const d = await openDB();
+      return new Promise((res, rej) => {
+        const tx = d.transaction("files", "readonly");
+        const req = tx.objectStore("files").get(key);
+        req.onsuccess = () => res(req.result || null);
+        req.onerror = () => rej(req.error);
+      });
+    }
+    async function dbDelete(key) {
+      const d = await openDB();
+      return new Promise((res, rej) => {
+        const tx = d.transaction("files", "readwrite");
+        tx.objectStore("files").delete(key);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    }
+
+    // ══════════════════════════════
+    // STORAGE HELPERS (localStorage for metadata only)
     // ══════════════════════════════
     function getProjects() {
-      const stored = localStorage.getItem("ae_projects_v2");
+      const stored = localStorage.getItem("ae_projects_v3");
       if (stored) return JSON.parse(stored);
-      // First time: save defaults and return them
       const defaults = JSON.parse(JSON.stringify(DEFAULT_PROJECTS));
-      localStorage.setItem("ae_projects_v2", JSON.stringify(defaults));
+      localStorage.setItem("ae_projects_v3", JSON.stringify(defaults));
       return defaults;
     }
 
     function saveProjects(data) {
-      localStorage.setItem("ae_projects_v2", JSON.stringify(data));
+      try {
+        localStorage.setItem("ae_projects_v3", JSON.stringify(data));
+      } catch(e) {
+        alert("خطأ في الحفظ: المساحة ممتلئة. جرب حذف بعض المشاريع القديمة.");
+      }
     }
 
     // ══════════════════════════════
@@ -1915,12 +1991,11 @@
             const hasCover = coverSrc.trim() !== "";
 
             if (isSpecial) {
-              // Professional Clean Design for Data/AI/Auto
               return `
                 <div class="proj-card" onclick="openDetailModal('${cat}','${p.id}')" style="cursor:pointer">
                   ${hasCover ? `
                     <div class="proj-cover" style="height:200px">
-                      <img src="${coverSrc}" alt="${p.title}" onerror="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='flex';" />
+                      <img src="${coverSrc}" alt="${p.title}" onerror="this.parentElement.innerHTML='<div style=\\'height:200px;display:flex;align-items:center;justify-content:center;font-size:3rem\\'>${p.emoji || '📊'}</div>'" />
                     </div>
                   ` : `<div class="proj-card-top" style="height:200px">${p.emoji || "📊"}</div>`}
                   
@@ -1931,17 +2006,17 @@
                       ${(p.tags || []).map(t => `<span class="proj-tool-tag">${t}</span>`).join("")}
                     </div>
                   </div>
+                  <button class="proj-edit" onclick="event.stopPropagation(); openEditModal('${cat}','${p.id}')">✏️</button>
                   <button class="proj-delete" onclick="event.stopPropagation(); deleteProject('${cat}','${p.id}')">✕</button>
                 </div>
               `;
             }
 
-            // Graphic Design remains unchanged (using original behance style)
             return `
               <div class="proj-card ${isGraphic ? 'graphic-card' : ''}" onclick="openDetailModal('${cat}','${p.id}')" style="cursor:pointer">
                 ${hasCover ? `
                   <div class="proj-cover">
-                    <img src="${coverSrc}" alt="${p.title}" onerror="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='flex';" />
+                    <img src="${coverSrc}" alt="${p.title}" onerror="this.parentElement.innerHTML='<div style=\\'height:240px;display:flex;align-items:center;justify-content:center;font-size:3rem\\'>${p.emoji || '📁'}</div>'" />
                   </div>
                 ` : `<div class="proj-card-top">${p.emoji || "📁"}</div>`}
                 
@@ -1952,6 +2027,7 @@
                     ${(p.tags || []).map(t => `<span class="proj-tag">${t}</span>`).join("")}
                   </div>
                 </div>
+                <button class="proj-edit" onclick="event.stopPropagation(); openEditModal('${cat}','${p.id}')">✏️</button>
                 <button class="proj-delete" onclick="event.stopPropagation(); deleteProject('${cat}','${p.id}')">✕</button>
               </div>
             `;
@@ -1969,9 +2045,21 @@
       if (!p) return;
 
       const detailContent = document.getElementById("detailContent");
-      const hasPdf = p.pdf && p.pdf.trim() !== "";
+      
+      // Load files: check pdfUrl first (external file), then IndexedDB
+      let pdfData = null;
+      if (p.pdfUrl) {
+        pdfData = p.pdfUrl; // external URL like "WorldSales.pdf"
+      } else if (p.hasPdf) {
+        pdfData = await dbGet("pdf_" + id);
+      } else if (p.pdf) {
+        pdfData = p.pdf;
+      }
+      const videoFileData = p.hasVideoFile ? await dbGet("vid_" + id) : (p.videoFile || null);
+
+      const hasPdf = !!pdfData;
       const hasVideoLink = p.video && p.video.trim() !== "";
-      const hasVideoFile = p.videoFile && p.videoFile.trim() !== "";
+      const hasVideoFile = !!videoFileData;
 
       detailContent.innerHTML = `
         <div class="detail-header">
@@ -1990,7 +2078,7 @@
             <div id="pdfViewer" class="pdf-pages-container">
               <div style="text-align:center; padding:5rem; color:var(--muted)">
                 <i class="fa-solid fa-circle-notch fa-spin fa-2x"></i>
-                <p style="margin-top:1rem">Rendering high-quality presentation...</p>
+                <p style="margin-top:1rem">جاري تحميل العرض التقديمي...</p>
               </div>
             </div>
           </div>
@@ -2001,8 +2089,8 @@
             <div class="video-player-wrapper">
               ${hasVideoFile ? `
                 <video controls style="width:100%; display:block">
-                  <source src="${p.videoFile}" type="video/mp4">
-                  Your browser does not support the video tag.
+                  <source src="${videoFileData}" type="video/mp4">
+                  المتصفح لا يدعم تشغيل الفيديو.
                 </video>
               ` : `
                 <iframe width="100%" height="500" src="${p.video.replace('watch?v=', 'embed/')}" frameborder="0" allowfullscreen></iframe>
@@ -2015,15 +2103,18 @@
       document.getElementById("detailModal").classList.add("open");
 
       if (hasPdf) {
-        // Use timeout to ensure DOM is ready
-        setTimeout(() => renderPdfAsImages(p.pdf, "pdfViewer"), 300);
+        setTimeout(() => renderPdfAsImages(pdfData, "pdfViewer"), 300);
       }
     }
 
     async function renderPdfAsImages(pdfData, containerId) {
       const container = document.getElementById(containerId);
       try {
-        const loadingTask = pdfjsLib.getDocument(pdfData);
+        // pdfData can be a URL string or base64 dataURL
+        const src = typeof pdfData === 'string' && pdfData.startsWith('data:') 
+          ? { data: atob(pdfData.split(',')[1]) }
+          : pdfData;
+        const loadingTask = pdfjsLib.getDocument(src);
         const pdf = await loadingTask.promise;
         container.innerHTML = ''; // Clear loader
 
@@ -2107,17 +2198,25 @@
     // ══════════════════════════════
     function openAddModal(cat) {
       if (!isAdmin) return;
+      editingProjectId = null;
       currentAddCat = cat;
       document.getElementById("addModal").classList.add("open");
       document.getElementById("modalCategory").value = cat;
+      document.querySelector("#addModal h3").textContent = "➕ Add New Project";
 
       // Reset fields
-      ["projTitle", "projDesc", "projVideo", "projTools", "projCoverPath"].forEach(id => {
-        if (document.getElementById(id)) document.getElementById(id).value = "";
+      ["projTitle", "projDesc", "projVideo", "projTools"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = "";
       });
       ["projCoverFile", "projPdfFile", "projVideoFile"].forEach(id => {
-        if (document.getElementById(id)) document.getElementById(id).value = "";
+        const el = document.getElementById(id);
+        if (el) el.value = "";
       });
+      const coverNote = document.getElementById("coverKeepNote");
+      if (coverNote) coverNote.style.display = "none";
+      const coverFileName = document.getElementById("coverFileName");
+      if (coverFileName) coverFileName.textContent = "";
 
       // Render tool buttons
       const container = document.getElementById("toolsContainer");
@@ -2125,15 +2224,12 @@
         <button class="proj-tab" style="font-size:0.7rem; padding:0.3rem 0.6rem;" onclick="this.classList.toggle('active')">${tool}</button>
       `).join("");
 
-      // Show/Hide extra fields based on category
       const extras = document.getElementById("extraFields");
       const gExtras = document.getElementById("graphicFields");
-
       if (cat === 'graphic') {
         extras.style.display = "none";
         gExtras.style.display = "block";
       } else {
-        // data, ai, auto
         extras.style.display = "block";
         gExtras.style.display = "none";
       }
@@ -2143,58 +2239,169 @@
 
     function closeModal() {
       document.getElementById("addModal").classList.remove("open");
+      editingProjectId = null;
+      document.querySelector("#addModal h3").textContent = "➕ Add New Project";
     }
 
     async function saveProject() {
       const title = document.getElementById("projTitle").value.trim();
       const desc = document.getElementById("projDesc").value.trim();
-      
-      // Get selected tools from buttons
-      const tags = Array.from(document.querySelectorAll("#toolsContainer .proj-tab.active")).map(btn => btn.textContent);
-      
+      const tags = Array.from(document.querySelectorAll("#toolsContainer .proj-tab.active")).map(btn => btn.textContent.trim());
       const video = document.getElementById("projVideo") ? document.getElementById("projVideo").value.trim() : "";
       const tools = document.getElementById("projTools") ? document.getElementById("projTools").value.trim() : "";
-      const cover = document.getElementById("projCoverPath").value.trim();
       const cat = document.getElementById("modalCategory").value;
 
-      if (!title) { alert("Please enter a project title."); return; }
+      if (!title) { alert("من فضلك أدخل عنوان المشروع."); return; }
 
-      // Helper to read file as base64
+      // Helper: read file as base64 dataURL
       const readFile = (file) => new Promise((res) => {
-        if (!file) return res("");
+        if (!file) return res(null);
         const reader = new FileReader();
         reader.onload = (e) => res(e.target.result);
+        reader.onerror = () => res(null);
         reader.readAsDataURL(file);
       });
 
-      const pdfFile = document.getElementById("projPdfFile") ? document.getElementById("projPdfFile").files[0] : null;
-      const videoFile = document.getElementById("projVideoFile") ? document.getElementById("projVideoFile").files[0] : null;
+      // Cover image: read as base64 directly
+      const coverFileEl = document.getElementById("projCoverFile");
+      const coverFile = coverFileEl && coverFileEl.files[0] ? coverFileEl.files[0] : null;
+      
+      // PDF & Video files
+      const pdfFileEl = document.getElementById("projPdfFile");
+      const videoFileEl = document.getElementById("projVideoFile");
+      const pdfFile = pdfFileEl && pdfFileEl.files[0] ? pdfFileEl.files[0] : null;
+      const videoFile = videoFileEl && videoFileEl.files[0] ? videoFileEl.files[0] : null;
 
       try {
-        const pdfBase64 = await readFile(pdfFile);
-        const vFileBase64 = await readFile(videoFile);
+        // Read cover as base64 (small enough for localStorage)
+        let coverBase64 = "";
+        if (coverFile) {
+          coverBase64 = await readFile(coverFile);
+        } else {
+          // If editing, keep existing cover if no new file chosen
+          if (editingProjectId) {
+            const data = getProjects();
+            const existing = data[cat] && data[cat].find(p => p.id === editingProjectId);
+            if (existing) coverBase64 = existing.cover || "";
+          }
+        }
 
         const data = getProjects();
-        const id = "p_" + Date.now();
-        data[cat].push({ 
-          id, title, desc, tags, cover, pdf: pdfBase64, video, videoFile: vFileBase64, tools 
-        });
-        saveProjects(data);
-        renderAll();
-        closeModal();
+        
+        if (editingProjectId) {
+          // EDIT mode
+          const idx = data[cat] ? data[cat].findIndex(p => p.id === editingProjectId) : -1;
+          if (idx === -1) { alert("لم يتم العثور على المشروع!"); return; }
+          
+          const proj = data[cat][idx];
+          proj.title = title;
+          proj.desc = desc;
+          proj.tags = tags;
+          proj.tools = tools;
+          proj.video = video;
+          proj.cover = coverBase64;
+
+          // Update PDF in IndexedDB if new file selected
+          if (pdfFile) {
+            const pdfBase64 = await readFile(pdfFile);
+            await dbSet("pdf_" + editingProjectId, pdfBase64);
+            proj.hasPdf = true;
+          }
+          // Update video file in IndexedDB if new file selected
+          if (videoFile) {
+            const vBase64 = await readFile(videoFile);
+            await dbSet("vid_" + editingProjectId, vBase64);
+            proj.hasVideoFile = true;
+          }
+
+          saveProjects(data);
+          renderAll();
+          closeModal();
+        } else {
+          // ADD mode
+          const id = "p_" + Date.now();
+          const proj = { id, title, desc, tags, cover: coverBase64, video, tools, hasPdf: false, hasVideoFile: false };
+
+          // Store PDF in IndexedDB
+          if (pdfFile) {
+            const pdfBase64 = await readFile(pdfFile);
+            await dbSet("pdf_" + id, pdfBase64);
+            proj.hasPdf = true;
+          }
+          // Store video in IndexedDB
+          if (videoFile) {
+            const vBase64 = await readFile(videoFile);
+            await dbSet("vid_" + id, vBase64);
+            proj.hasVideoFile = true;
+          }
+
+          if (!data[cat]) data[cat] = [];
+          data[cat].push(proj);
+          saveProjects(data);
+          renderAll();
+          closeModal();
+        }
       } catch (err) {
-        alert("Error saving project.");
+        alert("خطأ في الحفظ: " + err.message);
         console.error(err);
       }
     }
 
     function deleteProject(cat, id) {
       if (!isAdmin) return;
-      if (!confirm("Delete this project?")) return;
+      if (!confirm("هل تريد حذف هذا المشروع؟")) return;
       const data = getProjects();
       data[cat] = data[cat].filter(p => p.id !== id);
       saveProjects(data);
+      // Clean up IndexedDB
+      dbDelete("pdf_" + id).catch(() => {});
+      dbDelete("vid_" + id).catch(() => {});
       renderAll();
+    }
+
+    function openEditModal(cat, id) {
+      if (!isAdmin) return;
+      const data = getProjects();
+      const p = data[cat].find(item => item.id === id);
+      if (!p) return;
+
+      editingProjectId = id;
+      currentAddCat = cat;
+
+      document.getElementById("addModal").classList.add("open");
+      document.getElementById("modalCategory").value = cat;
+
+      // Fill existing values
+      document.getElementById("projTitle").value = p.title || "";
+      document.getElementById("projDesc").value = p.desc || "";
+      if (document.getElementById("projVideo")) document.getElementById("projVideo").value = p.video || "";
+      if (document.getElementById("projTools")) document.getElementById("projTools").value = p.tools || "";
+      // Show cover note if existing cover
+      const coverNote = document.getElementById("coverKeepNote");
+      if (coverNote) coverNote.style.display = p.cover ? "block" : "none";
+      const coverFileName = document.getElementById("coverFileName");
+      if (coverFileName) coverFileName.textContent = "";
+
+      // Change modal title
+      document.querySelector("#addModal h3").textContent = "✏️ تعديل المشروع";
+
+      // Render tool buttons with existing selection
+      const container = document.getElementById("toolsContainer");
+      container.innerHTML = AVAILABLE_TOOLS.map(tool => `
+        <button class="proj-tab${(p.tags || []).includes(tool) ? ' active' : ''}" style="font-size:0.7rem; padding:0.3rem 0.6rem;" onclick="this.classList.toggle('active')">${tool}</button>
+      `).join("");
+
+      const extras = document.getElementById("extraFields");
+      const gExtras = document.getElementById("graphicFields");
+      if (cat === 'graphic') {
+        extras.style.display = "none";
+        gExtras.style.display = "block";
+      } else {
+        extras.style.display = "block";
+        gExtras.style.display = "none";
+      }
+
+      setTimeout(() => document.getElementById("projTitle").focus(), 100);
     }
 
     // ══════════════════════════════
